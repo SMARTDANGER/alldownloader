@@ -1,0 +1,10 @@
+{
+  "name": "alldownloader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Paste a link, pick a quality, download. YouTube (up to 8K), Instagram, TikTok, SoundCloud and Spotify.",
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev"
+  }
+}

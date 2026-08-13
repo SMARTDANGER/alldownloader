@@ -1,0 +1,3 @@
+# Left unpinned on purpose: extractors break when sites change, and a fresh
+# yt-dlp on every deploy is what keeps this working. Redeploy to update.
+yt-dlp

@@ -1,0 +1,2 @@
+# The merge worker is a separate service — see worker/README.md
+worker/
