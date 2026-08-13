@@ -32,6 +32,25 @@ def secret_is_default() -> bool:
     return not os.environ.get("DOWNLOAD_SECRET")
 
 
+def secret_misconfigured() -> bool:
+    """True when this deployment must refuse to sign links.
+
+    The fallback secret is published in this repository, so serving with it
+    would make the download endpoint a forgeable proxy for any URL. Local work
+    is allowed to use it; anything running on Vercel is not.
+    """
+    on_vercel = bool(os.environ.get("VERCEL"))
+    is_local_dev = os.environ.get("VERCEL_ENV") == "development"
+    return secret_is_default() and on_vercel and not is_local_dev
+
+
+SECRET_REQUIRED_MESSAGE = (
+    "This deployment has no DOWNLOAD_SECRET set, so it will not issue download "
+    "links. Add DOWNLOAD_SECRET (any long random string) in your Vercel project's "
+    "Environment Variables and redeploy."
+)
+
+
 def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
@@ -87,8 +106,12 @@ def ydl_opts(**extra) -> dict:
     if cookies:
         path = "/tmp/cookies.txt"
         if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as fh:
+            # Write then rename: concurrent invocations share one instance under
+            # Fluid compute, and a reader must never see a half-written jar.
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
                 fh.write(cookies.replace("\\n", "\n"))
+            os.replace(tmp, path)
         opts["cookiefile"] = path
     if os.environ.get("YTDLP_USER_AGENT"):
         opts.setdefault("http_headers", {})["User-Agent"] = os.environ["YTDLP_USER_AGENT"]
@@ -101,6 +124,9 @@ def extract(url: str, flat: bool = False, **extra) -> dict:
     if flat:
         opts["extract_flat"] = "in_playlist"
         opts["noplaylist"] = False
+        # Stop yt-dlp walking a 5000-video channel we are only going to
+        # truncate anyway.
+        opts["playlistend"] = MAX_PLAYLIST_ENTRIES
     with YoutubeDL(opts) as ydl:
         return ydl.sanitize_info(ydl.extract_info(url, download=False))
 
@@ -160,8 +186,9 @@ def _is_direct(fmt: dict) -> bool:
     return proto in ("https", "http") and bool(fmt.get("url"))
 
 
-AUDIO_EXTS = {"mp3", "m4a", "aac", "opus", "ogg", "oga", "wav", "flac", "weba"}
+AUDIO_EXTS = {"mp3", "m4a", "aac", "opus", "ogg", "oga", "wav", "flac", "weba", "aiff", "alac"}
 VIDEO_EXTS = {"mp4", "m4v", "mov", "webm", "mkv", "avi", "flv", "3gp", "ts"}
+IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "bmp", "svg"}
 
 
 def classify(fmt: dict) -> tuple[bool, bool]:
@@ -172,7 +199,15 @@ def classify(fmt: dict) -> tuple[bool, bool]:
     for instance, omits acodec entirely on its progressive MP4s and sets it to
     'none' only when the clip genuinely has no sound. Reading missing as absent
     threw those complete files away and left the silent DASH video track.
+
+    Evidence is weighed in order: an explicit 'none', then a reported codec or
+    dimensions, and only then the container extension. Container last matters —
+    an audio-only stream delivered in an .mp4 must not read as a video.
     """
+    ext = (fmt.get("ext") or "").lower()
+    if ext in IMAGE_EXTS:
+        return False, False  # photo posts and storyboards are not downloads we offer
+
     vcodec = (fmt.get("vcodec") or "").lower()
     acodec = (fmt.get("acodec") or "").lower()
     video_absent, audio_absent = vcodec == "none", acodec == "none"
@@ -181,18 +216,27 @@ def classify(fmt: dict) -> tuple[bool, bool]:
 
     vcodec_known = vcodec not in ("", "none", "unknown")
     acodec_known = acodec not in ("", "none", "unknown")
-    ext = (fmt.get("ext") or "").lower()
     has_dimensions = bool(fmt.get("height") or fmt.get("width"))
+    audio_hints = bool(fmt.get("abr") or fmt.get("asr")) or ext in AUDIO_EXTS
 
-    has_video = not video_absent and (vcodec_known or has_dimensions or ext in VIDEO_EXTS)
+    if video_absent:
+        has_video = False
+    elif vcodec_known or has_dimensions:
+        has_video = True
+    else:
+        # Nothing states there is a picture. Trust the container only when
+        # nothing points at audio instead.
+        has_video = ext in VIDEO_EXTS and not (acodec_known or audio_hints)
+
     if has_video:
         # A progressive video container with no audio metadata is assumed to
         # carry sound; that is what it means for a site not to report codecs.
         has_audio = not audio_absent and (acodec_known or ext in VIDEO_EXTS)
     else:
-        has_audio = not audio_absent and (
-            acodec_known or ext in AUDIO_EXTS or bool(fmt.get("abr") or fmt.get("asr"))
-        )
+        # vcodec 'none' is itself proof this is a standalone audio stream, even
+        # when the extractor names neither the codec nor a familiar extension
+        # (SoundCloud's lossless "Original file" download, for one).
+        has_audio = not audio_absent and (acodec_known or audio_hints or video_absent)
     return has_video, has_audio
 
 
@@ -429,7 +473,10 @@ def flat_entries(info: dict) -> list:
     for entry in (info.get("entries") or [])[:MAX_PLAYLIST_ENTRIES]:
         if not entry:
             continue
-        url = entry.get("url") or entry.get("webpage_url")
+        # webpage_url first: on a fully-extracted entry (an Instagram carousel,
+        # say) "url" is the direct CDN media link, and posting that back to
+        # /api/resolve would hand it to the generic extractor.
+        url = entry.get("webpage_url") or entry.get("url")
         if not url:
             continue
         entries.append(

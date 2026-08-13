@@ -196,7 +196,7 @@ function renderResult(data) {
     resultBox.append(
       el('p', {
         className: 'note warn',
-        textContent: 'DOWNLOAD_SECRET is not set — anyone could forge download links against this deployment. Set it in your Vercel project settings.',
+        textContent: 'Running with the placeholder DOWNLOAD_SECRET. That is fine locally, but a deployed copy refuses to issue links until you set a real one.',
       }),
     );
   }
@@ -240,6 +240,12 @@ function renderPlaylist(data, remember = true) {
 
 /* ---------------- network ---------------- */
 
+// One track failing must not cost the user the playlist they drilled into.
+function restoreAfterFailure(message) {
+  if (playlistState) renderPlaylist(playlistState, false);
+  setStatus(message, 'error'); // after the render — renderPlaylist clears the status
+}
+
 async function resolve(link, { keepPlaylist = false } = {}) {
   if (!keepPlaylist) playlistState = null;
   resultBox.hidden = true;
@@ -255,7 +261,7 @@ async function resolve(link, { keepPlaylist = false } = {}) {
     const data = await response.json().catch(() => ({}));
 
     if (!response.ok || !data.ok) {
-      setStatus(data.error || `Something went wrong (${response.status}).`, 'error');
+      restoreAfterFailure(data.error || `Something went wrong (${response.status}).`);
       return;
     }
     setStatus('');
@@ -263,7 +269,7 @@ async function resolve(link, { keepPlaylist = false } = {}) {
     else renderResult(data);
     resultBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch {
-    setStatus('Network error — check your connection and try again.', 'error');
+    restoreAfterFailure('Network error — check your connection and try again.');
   } finally {
     goButton.disabled = false;
   }

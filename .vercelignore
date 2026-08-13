@@ -1,2 +1,4 @@
 # The merge worker is a separate service — see worker/README.md
 worker/
+# Tests never need to ship in a function bundle
+tests/

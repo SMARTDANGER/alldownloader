@@ -30,20 +30,23 @@ build works whatever the import screen guessed. Leave Build and Output settings 
 > *"No python entrypoint found in default locations"*. The pin keeps file-based `/api` routing,
 > where each `.py` and `.js` file is its own function.
 
-**Set `DOWNLOAD_SECRET` before you go public.** Download links are HMAC-signed with it, which
-is what stops the deployment being used as an open proxy for arbitrary URLs:
+**Set `DOWNLOAD_SECRET` — the site will not work without it.** Download links are HMAC-signed
+with it, which is what stops the deployment being used as an open proxy for arbitrary URLs:
 
 ```bash
 vercel env add DOWNLOAD_SECRET      # paste any long random string
 ```
 
-The site warns you on screen while it is unset.
+There is a fallback secret in the source for local work, but it is published in this
+repository, so a deployment that used it could have its links forged by anyone. Rather than
+rely on you noticing a warning, both endpoints refuse to serve when running on Vercel without
+their own secret and say so. Local development is unaffected.
 
 ### Environment variables
 
 | Variable | Required | What it does |
 | --- | --- | --- |
-| `DOWNLOAD_SECRET` | **yes, in production** | Signs download links. Any long random string. |
+| `DOWNLOAD_SECRET` | **yes** | Signs download links. Any long random string. Deployments refuse to serve without it. |
 | `YTDLP_COOKIES` | for YouTube / Instagram | Netscape-format `cookies.txt` contents. Most YouTube and Instagram links need this from a datacenter IP. |
 | `YTDLP_PROXY` | sometimes | `http://user:pass@host:port`. Use a residential proxy when a site blocks the server's IP outright (TikTok does this often). |
 | `MUX_URL` | optional | Base URL of a merge worker (see below) so 8K arrives as one file. |
@@ -131,8 +134,17 @@ pip install yt-dlp
 vercel dev          # http://localhost:3000
 ```
 
-`vercel dev` runs both the Python and Edge functions locally. Set `DOWNLOAD_SECRET` in a
-`.env` file first, otherwise the site runs with a placeholder secret and says so.
+`vercel dev` runs both functions locally. Without `DOWNLOAD_SECRET` in a `.env` file the site
+falls back to a placeholder secret and says so on screen; that fallback works locally but is
+refused on a real deployment.
+
+Format classification is the fiddly part — every platform reports codecs differently, and
+guessing wrong is what produces a silent video or a missing option. It is covered by tests
+that need no network:
+
+```bash
+python3 tests/test_formats.py
+```
 
 ## Limits worth knowing
 

@@ -32,6 +32,7 @@ app = FastAPI(title="AllDownloader mux worker")
 
 SECRET = (os.environ.get("DOWNLOAD_SECRET") or "insecure-dev-secret-set-DOWNLOAD_SECRET").encode()
 CHUNK = 256 * 1024
+ERROR_TAIL = 8192  # how much ffmpeg stderr to keep for diagnostics
 
 
 def _unb64(value: str) -> bytes:
@@ -92,17 +93,51 @@ async def mux(t: str = Query(..., description="Signed token from /api/resolve"))
         stderr=asyncio.subprocess.PIPE,
     )
 
+    # stderr has to be read continuously. Left alone it fills its pipe buffer,
+    # at which point ffmpeg blocks on the write and stops producing output —
+    # the download would hang forever rather than fail.
+    errors = bytearray()
+
+    async def drain_errors():
+        while True:
+            chunk = await process.stderr.read(4096)
+            if not chunk:
+                return
+            errors.extend(chunk)
+            del errors[:-ERROR_TAIL]  # keep only the last few KB
+
+    drainer = asyncio.create_task(drain_errors())
+
+    def error_text() -> str:
+        return bytes(errors).decode("utf-8", "replace").strip()
+
+    # Read the first chunk up front: if ffmpeg cannot start the merge at all,
+    # fail with a status the browser can act on instead of streaming a 200
+    # that saves as an empty file.
+    first = await process.stdout.read(CHUNK)
+    if not first:
+        await process.wait()
+        await drainer
+        raise HTTPException(502, f"Merge failed: {error_text()[:300] or 'ffmpeg produced no output'}")
+
     async def stream():
         try:
+            yield first
             while True:
                 chunk = await process.stdout.read(CHUNK)
                 if not chunk:
                     break
                 yield chunk
+            await process.wait()
+            if process.returncode:
+                # Too late for a status code — the client has the bytes already.
+                # Logging it is what makes a truncated file diagnosable.
+                print(f"[mux] ffmpeg exited {process.returncode}: {error_text()[:500]}", flush=True)
         finally:
+            drainer.cancel()
             if process.returncode is None:
                 process.kill()
-            await process.wait()
+                await process.wait()
 
     ascii_name = filename.encode("ascii", "ignore").decode().replace('"', "") or "download"
     return StreamingResponse(

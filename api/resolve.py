@@ -1,6 +1,7 @@
 """POST /api/resolve  {"url": "..."}  ->  media metadata + download options."""
 
 import json
+import re
 import sys
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -9,25 +10,32 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _common import (  # noqa: E402
+    SECRET_REQUIRED_MESSAGE,
     detect_platform,
     extract,
     flat_entries,
     friendly_error,
     payload_for,
     secret_is_default,
+    secret_misconfigured,
     valid_url,
 )
 import _spotify  # noqa: E402
 
-PLAYLIST_HINTS = ("list=", "/playlist", "/sets/", "/album/", "/channel/", "/@")
+# YouTube channel and handle pages, which are playlists in all but name.
+YT_COLLECTION_RE = re.compile(r"/(?:channel/|user/|c/|@)[^/?#]+")
 
 
 def looks_like_playlist(url: str, platform: str) -> bool:
+    """Collections go through flat extraction. Getting this wrong is expensive:
+    a channel page extracted in full would run well past the 60 s limit."""
     lowered = url.lower()
     if platform == "youtube":
-        return "list=" in lowered and "watch?v=" not in lowered
+        if "list=" in lowered and "watch?v=" not in lowered:
+            return True
+        return bool(YT_COLLECTION_RE.search(lowered))
     if platform == "soundcloud":
-        return "/sets/" in lowered
+        return "/sets/" in lowered or lowered.rstrip("/").endswith(("/tracks", "/albums"))
     return False
 
 
@@ -79,6 +87,8 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def _handle(self, url: str):
+        if secret_misconfigured():
+            return self._send(503, {"ok": False, "error": SECRET_REQUIRED_MESSAGE})
         if not url or not valid_url(url):
             return self._send(400, {"ok": False, "error": "Paste a full http(s) link."})
         try:

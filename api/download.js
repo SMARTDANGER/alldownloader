@@ -57,6 +57,18 @@ function json(status, body) {
 }
 
 export async function GET(request) {
+  // DEV_SECRET is published in this repository. Honouring tokens signed with it
+  // on a real deployment would make this endpoint a proxy for any URL, so a
+  // deployment without its own secret serves nothing.
+  if (!process.env.DOWNLOAD_SECRET && process.env.VERCEL && process.env.VERCEL_ENV !== 'development') {
+    return json(503, {
+      ok: false,
+      error:
+        'This deployment has no DOWNLOAD_SECRET set, so downloads are disabled. ' +
+        "Add DOWNLOAD_SECRET in your Vercel project's Environment Variables and redeploy.",
+    });
+  }
+
   const token = new URL(request.url).searchParams.get('t');
   if (!token) return json(400, { ok: false, error: 'Missing token.' });
 

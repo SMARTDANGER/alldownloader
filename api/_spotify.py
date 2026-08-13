@@ -19,7 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from _common import extract, payload_for
+from _common import MAX_PLAYLIST_ENTRIES, extract, payload_for
 
 _TOKEN = {"value": None, "expires": 0}
 SPOTIFY_URL_RE = re.compile(
@@ -100,25 +100,39 @@ def track_metadata(track_id: str) -> dict:
     }
 
 
+def _paged(path: str, page_size: int, cap: int) -> list:
+    """Walk Spotify's paging objects. A single call returns at most 50 (album)
+    or 100 (playlist) tracks, so anything longer needs following."""
+    items, offset = [], 0
+    while len(items) < cap:
+        joiner = "&" if "?" in path else "?"
+        page = _api(f"{path}{joiner}limit={page_size}&offset={offset}")
+        batch = page.get("items") or []
+        items.extend(batch)
+        if not page.get("next") or len(batch) < page_size:
+            break
+        offset += page_size
+    return items[:cap]
+
+
 def collection_entries(kind: str, spotify_id: str) -> tuple[str, list]:
     if not has_credentials():
         raise RuntimeError(
             "Spotify albums and playlists need app credentials. Add SPOTIFY_CLIENT_ID "
             "and SPOTIFY_CLIENT_SECRET to your Vercel environment variables."
         )
-    entries, name = [], "Spotify"
+    entries = []
     if kind == "album":
         album = _api(f"albums/{spotify_id}")
-        name = album.get("name") or name
+        name = album.get("name") or "Spotify album"
         cover = ((album.get("images") or [{}])[0]).get("url")
-        items = (album.get("tracks") or {}).get("items") or []
-        for track in items:
-            meta = _track_meta({**track, "album": {"images": [{"url": cover}] if cover else []}})
-            entries.append(_as_entry(meta))
+        images = [{"url": cover}] if cover else []
+        for track in _paged(f"albums/{spotify_id}/tracks", 50, MAX_PLAYLIST_ENTRIES):
+            entries.append(_as_entry(_track_meta({**track, "album": {"images": images}})))
     else:
-        playlist = _api(f"playlists/{spotify_id}?fields=name,tracks.items(track(id,name,artists,duration_ms,album(images))),tracks.next")
-        name = playlist.get("name") or name
-        for item in (playlist.get("tracks") or {}).get("items") or []:
+        name = _api(f"playlists/{spotify_id}?fields=name").get("name") or "Spotify playlist"
+        fields = "fields=next,items(track(id,name,artists,duration_ms,album(images)))"
+        for item in _paged(f"playlists/{spotify_id}/tracks?{fields}", 100, MAX_PLAYLIST_ENTRIES):
             track = item.get("track")
             if track and track.get("id"):
                 entries.append(_as_entry(_track_meta(track)))
