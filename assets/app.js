@@ -95,6 +95,9 @@ function badges(option) {
   if (option.needs_mux && !option.mux_available) {
     out.push(el('span', { className: 'badge', textContent: '2 files' }));
   }
+  if (option.kind === 'video' && !option.muxed && !option.needs_mux) {
+    out.push(el('span', { className: 'badge', textContent: 'no sound' }));
+  }
   return out;
 }
 

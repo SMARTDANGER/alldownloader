@@ -110,7 +110,10 @@ H.264 version for maximum compatibility or the HEVC/higher-bitrate one for the b
 *Best quality* picks the highest-bitrate stream whatever the codec, and *Most compatible*
 picks the best H.264 MP4.
 
-**Instagram** — posts, reels and stories. Private accounts need `YTDLP_COOKIES`.
+**Instagram** — posts, reels and stories, delivered as one MP4 with sound. Instagram serves a
+complete progressive MP4 alongside a separate DASH video/audio pair, and it signals "this file
+has audio" by *omitting* the audio codec rather than stating it, so the complete file has to be
+recognised by absence. Private accounts need `YTDLP_COOKIES`.
 
 **SoundCloud** — tracks and sets. Tracks published with SoundCloud's DRM cannot be downloaded
 and are reported as such.

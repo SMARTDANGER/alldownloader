@@ -160,6 +160,42 @@ def _is_direct(fmt: dict) -> bool:
     return proto in ("https", "http") and bool(fmt.get("url"))
 
 
+AUDIO_EXTS = {"mp3", "m4a", "aac", "opus", "ogg", "oga", "wav", "flac", "weba"}
+VIDEO_EXTS = {"mp4", "m4v", "mov", "webm", "mkv", "avi", "flv", "3gp", "ts"}
+
+
+def classify(fmt: dict) -> tuple[bool, bool]:
+    """Work out whether a format carries video and/or audio.
+
+    Only 'none' means a stream is definitively absent. A *missing* codec means
+    the extractor didn't report one, which is not the same thing — Instagram,
+    for instance, omits acodec entirely on its progressive MP4s and sets it to
+    'none' only when the clip genuinely has no sound. Reading missing as absent
+    threw those complete files away and left the silent DASH video track.
+    """
+    vcodec = (fmt.get("vcodec") or "").lower()
+    acodec = (fmt.get("acodec") or "").lower()
+    video_absent, audio_absent = vcodec == "none", acodec == "none"
+    if video_absent and audio_absent:
+        return False, False
+
+    vcodec_known = vcodec not in ("", "none", "unknown")
+    acodec_known = acodec not in ("", "none", "unknown")
+    ext = (fmt.get("ext") or "").lower()
+    has_dimensions = bool(fmt.get("height") or fmt.get("width"))
+
+    has_video = not video_absent and (vcodec_known or has_dimensions or ext in VIDEO_EXTS)
+    if has_video:
+        # A progressive video container with no audio metadata is assumed to
+        # carry sound; that is what it means for a site not to report codecs.
+        has_audio = not audio_absent and (acodec_known or ext in VIDEO_EXTS)
+    else:
+        has_audio = not audio_absent and (
+            acodec_known or ext in AUDIO_EXTS or bool(fmt.get("abr") or fmt.get("asr"))
+        )
+    return has_video, has_audio
+
+
 def shape_formats(info: dict) -> dict:
     """Turn yt-dlp's raw format list into the small, sorted lists the UI uses."""
     raw = info.get("formats") or []
@@ -171,8 +207,7 @@ def shape_formats(info: dict) -> dict:
         if not _is_direct(fmt):
             continue
         vcodec, acodec = fmt.get("vcodec"), fmt.get("acodec")
-        has_video = vcodec and vcodec != "none"
-        has_audio = acodec and acodec != "none"
+        has_video, has_audio = classify(fmt)
         if not has_video and not has_audio:
             continue
         entry = {
@@ -184,11 +219,15 @@ def shape_formats(info: dict) -> dict:
             "headers": fmt.get("http_headers") or {},
         }
         if has_video:
+            height, width = fmt.get("height") or 0, fmt.get("width") or 0
             entry.update(
                 {
                     "kind": "video",
-                    "height": fmt.get("height") or 0,
-                    "width": fmt.get("width") or 0,
+                    "height": height,
+                    "width": width,
+                    # Portrait clips (reels, Shorts, TikToks) are 1080x1920 —
+                    # people call that 1080p, so rank and label by the short side.
+                    "quality": min(width, height) if width and height else height,
                     "fps": fmt.get("fps") or 0,
                     "vcodec": codec_label(vcodec),
                     "acodec": audio_codec_label(acodec) if has_audio else "",
@@ -196,7 +235,7 @@ def shape_formats(info: dict) -> dict:
                     "dynamic_range": fmt.get("dynamic_range") or "",
                 }
             )
-            entry["label"] = _quality_name(entry["height"], entry["fps"])
+            entry["label"] = _quality_name(entry["quality"], entry["fps"])
             videos.append(entry)
         else:
             entry.update(
@@ -210,7 +249,9 @@ def shape_formats(info: dict) -> dict:
             entry["label"] = f"{entry['abr']} kbps" if entry["abr"] else "Audio"
             audios.append(entry)
 
-    videos.sort(key=lambda f: (f["height"], f["fps"], f["tbr"]), reverse=True)
+    # Ranked by quality, then by whether the file already carries its own audio —
+    # at equal quality a ready-to-play file beats one that needs merging.
+    videos.sort(key=lambda f: (f["quality"], f["fps"], f["muxed"], f["tbr"]), reverse=True)
     audios.sort(key=lambda f: (f["abr"], f["tbr"]), reverse=True)
     return {"videos": _dedupe_videos(videos), "audios": _dedupe_audios(audios)}
 
@@ -218,7 +259,7 @@ def shape_formats(info: dict) -> dict:
 def _dedupe_videos(videos):
     seen, out = {}, []
     for fmt in videos:
-        key = (fmt["height"], fmt["fps"], fmt["vcodec"], fmt["muxed"], fmt["ext"])
+        key = (fmt["quality"], fmt["fps"], fmt["vcodec"], fmt["muxed"], fmt["ext"])
         if key not in seen:
             seen[key] = True
             out.append(fmt)
@@ -269,7 +310,9 @@ def build_option(title: str, fmt: dict, audio: dict | None, mux_url: str | None)
         "filesize": fmt.get("filesize"),
         "codec": fmt.get("vcodec") if is_video else fmt.get("acodec"),
         "audio_codec": (audio or fmt).get("acodec") if is_video else None,
-        "height": fmt.get("height") if is_video else None,
+        # The "p" number a viewer would recognise — short side, so a portrait
+        # 1080x1920 reel reads as 1080p rather than 1920p.
+        "height": fmt.get("quality") if is_video else None,
         "fps": fmt.get("fps") if is_video else None,
         "hdr": (fmt.get("dynamic_range") or "").upper() not in ("", "SDR"),
         "muxed": bool(fmt.get("muxed")) or needs_mux,
@@ -323,7 +366,17 @@ def quick_picks(options: list) -> list:
     audios = [o for o in options if o["kind"] == "audio"]
 
     if videos:
-        best = max(videos, key=lambda o: (o.get("height") or 0, o.get("fps") or 0))
+        # At equal quality prefer the option that needs no merging, so "Best
+        # quality" only turns into a two-file download when it genuinely buys
+        # more resolution.
+        best = max(
+            videos,
+            key=lambda o: (
+                o.get("height") or 0,
+                o.get("fps") or 0,
+                not (o["needs_mux"] and not o["mux_available"]),
+            ),
+        )
         picks.append(dict(best, pick="Best quality"))
 
         # "Compatible" has to arrive as one ready-to-play file, so video-only
@@ -349,9 +402,10 @@ def payload_for(info: dict, platform: str, source_url: str, title: str | None = 
 
     options = []
     for fmt in videos:
+        # A video-only stream with nothing to pair it with is still worth
+        # offering — some clips genuinely have no sound — but it downloads as
+        # a plain silent file rather than a merge.
         audio = None if fmt["muxed"] else best_audio_for(fmt, audios)
-        if not fmt["muxed"] and audio is None:
-            continue  # video-only with no audio to pair — not useful
         options.append(build_option(title, fmt, audio, mux_url))
     for fmt in audios:
         options.append(build_option(title, fmt, None, mux_url))
