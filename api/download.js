@@ -1,12 +1,16 @@
 // GET /api/download?t=<signed token>
 //
-// Streams the resolved media back to the browser as a file attachment. It runs
-// on the Edge runtime so the body is piped through instead of buffered — the
-// 4.5 MB serverless response limit does not apply, and multi-gigabyte 8K files
-// work. The token is HMAC-signed by /api/resolve, so this cannot be used as an
-// open proxy for arbitrary URLs.
-
-export const config = { runtime: 'edge' };
+// Streams the resolved media back to the browser as a file attachment. The body
+// is piped straight through rather than buffered, so the 4.5 MB serverless
+// response limit does not apply and large files work.
+//
+// This is a Web handler on the Node runtime: exporting the HTTP method by name
+// (with no default export) is what selects the Request/Response signature. Node
+// rather than Edge because Edge stops streaming at a fixed 300 s, while Node
+// honours the maxDuration set in vercel.json.
+//
+// The token is HMAC-signed by /api/resolve, so this cannot be used as an open
+// proxy for arbitrary URLs.
 
 const DEV_SECRET = 'insecure-dev-secret-set-DOWNLOAD_SECRET';
 
@@ -52,7 +56,7 @@ function json(status, body) {
   });
 }
 
-export default async function handler(request) {
+export async function GET(request) {
   const token = new URL(request.url).searchParams.get('t');
   if (!token) return json(400, { ok: false, error: 'Missing token.' });
 

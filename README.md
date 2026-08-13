@@ -20,8 +20,15 @@ vercel            # preview
 vercel --prod     # production
 ```
 
-Or import the repo at [vercel.com/new](https://vercel.com/new). No build settings needed —
-Vercel serves the static files and builds `api/` automatically.
+Or import the repo at [vercel.com/new](https://vercel.com/new). **Framework Preset: Other** —
+this is not a Next.js/FastAPI app, it is static files plus file-based functions in `api/`.
+`vercel.json` already pins `"framework": null`, which overrides the dashboard setting, so the
+build works whatever the import screen guessed. Leave Build and Output settings empty.
+
+> Without that pin, Vercel sees the root `requirements.txt`, decides the repo is a Python
+> *framework* app, looks for a single entrypoint (`app.py`, `main.py`, …) and fails with
+> *"No python entrypoint found in default locations"*. The pin keeps file-based `/api` routing,
+> where each `.py` and `.js` file is its own function.
 
 **Set `DOWNLOAD_SECRET` before you go public.** Download links are HMAC-signed with it, which
 is what stops the deployment being used as an open proxy for arbitrary URLs:
@@ -56,15 +63,20 @@ help and you need `YTDLP_PROXY`.
 ```
 browser ──POST /api/resolve──▶  Python function (yt-dlp)
                                  └─ returns formats + HMAC-signed links
-browser ──GET  /api/download──▶  Edge function
+browser ──GET  /api/download──▶  Node function (Web handler)
                                  └─ streams the media through with
                                     Content-Disposition: attachment
 ```
 
-The download endpoint runs on the **Edge runtime** deliberately: it pipes the response body
-straight through instead of buffering it, so the 4.5 MB serverless response limit does not
-apply and multi-gigabyte files work. `Range` requests are forwarded, so downloads resume and
-seek normally.
+The download endpoint pipes the response body straight through instead of buffering it, so the
+4.5 MB serverless response limit does not apply. `Range` requests are forwarded, so downloads
+resume and seek normally.
+
+It is a **Web handler on the Node runtime** — `export async function GET(request)` returning a
+`Response`, with no default export, which is what selects the `Request`/`Response` signature.
+Node rather than Edge because Edge stops streaming at a hard 300 s, while Node honours the
+`maxDuration` in `vercel.json` — set to `"max"` so it takes whatever the plan allows (300 s on
+Hobby, 800 s on Pro) without ever over-requesting and failing the build.
 
 Proxying (rather than linking straight to the CDN) is what makes the file actually save with a
 proper name — TikTok and Instagram CDNs reject requests without their original headers, and
@@ -124,6 +136,12 @@ vercel dev          # http://localhost:3000
 - **Bandwidth is yours.** Every download flows through your deployment, so it counts against
   your Vercel usage. A handful of 8K downloads will eat a Hobby plan's allowance — put it
   behind auth, or run the traffic through the merge worker's host, if you expect real use.
+- **A single download gets your plan's maximum function duration** — `maxDuration` is set to
+  `"max"`, which resolves to 300 s on Hobby and 800 s on Pro with Fluid compute. That is plenty
+  at normal speeds (300 s covers roughly 3 GB at 10 MB/s), but a genuinely huge 8K file on a
+  slow connection can be cut off.
+  Because `Range` is forwarded, browsers and download managers resume an interrupted transfer
+  rather than restarting it; links stay valid for six hours.
 - **Resolving takes a second or two** per link; the Python function is capped at 60 s.
 - **Extractors break** when sites change. `requirements.txt` deliberately leaves `yt-dlp`
   unpinned — redeploy to pick up a fresh version, which fixes most breakage.

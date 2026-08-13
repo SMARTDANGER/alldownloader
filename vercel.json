@@ -1,10 +1,14 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "fluid": true,
   "functions": {
     "api/resolve.py": {
-      "memory": 1024,
       "maxDuration": 60,
       "includeFiles": "api/**"
+    },
+    "api/download.js": {
+      "maxDuration": "max"
     }
   },
   "headers": [
